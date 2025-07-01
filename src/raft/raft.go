@@ -73,18 +73,17 @@ type Raft struct {
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	state            int32
-	currentTerm      int
-	votedFor         int
-	timer            time.Time
-	heartbeatTimeout chan struct{}
-	electionTimeout  chan struct{}
-	log              []LogEntry
-	commitIndex      int
-	lastApplied      int
-	nextIndex        []int //for leader: all server's next index
-	matchIndex       []int //for leader: the lastest repliacted entry index in all server
-	applyCh          chan ApplyMsg
+	state         int32
+	currentTerm   int
+	votedFor      int
+	heartbeattime time.Duration
+	electiontime  time.Time
+	log           []LogEntry
+	commitIndex   int
+	lastApplied   int
+	nextIndex     []int //for leader: all server's next index
+	matchIndex    []int //for leader: the lastest repliacted entry index in all server
+	applyCh       chan ApplyMsg
 }
 
 // return currentTerm and whether this server
@@ -196,7 +195,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
-		rf.timer = time.Now()
+		rf.ResetElectionTimer()
 	}
 	return
 }
@@ -369,6 +368,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.nextIndex[rf.me] = rf.log[len(rf.log)-1].Index + 1
 		rf.matchIndex[rf.me] = rf.log[len(rf.log)-1].Index
 		DPrintf("<<<<<<<<<<<< a log entry to raft--[%d],index[%d] , entry--[%d,%d]\n", rf.me, index, entry.Index, entry.Term)
+		rf.BroadcastHeartBeat()
+
 	}
 	return index, term, isLeader
 }
@@ -394,7 +395,7 @@ func (rf *Raft) killed() bool {
 
 func (rf *Raft) SetState(newState int32) {
 	atomic.StoreInt32(&rf.state, newState)
-	rf.timer = time.Now()
+	rf.ResetElectionTimer()
 	switch newState {
 	case Follower:
 	case Candidate:
@@ -464,7 +465,7 @@ func (rf *Raft) BroadcastRequestVote(target int, count *int32) {
 }
 
 func (rf *Raft) BroadcastHeartBeat() {
-	rf.timer = time.Now()
+	rf.ResetElectionTimer()
 
 	DPrintf("BroadcastHeartBeat: now leader[%d]'s entries :[%v]\n", rf.me, rf.log)
 	for i, _ := range rf.peers {
@@ -596,44 +597,23 @@ func (rf *Raft) ticker() {
 		// Your code here (3A)
 		// Check if a leader election should be started.
 
-		select {
-		case <-rf.electionTimeout:
-			rf.Election()
-		case <-rf.heartbeatTimeout:
+		time.Sleep(rf.heartbeattime)
+		rf.mu.Lock()
+		if rf.state == Leader {
 			rf.BroadcastHeartBeat()
-
-			// default:
-			// pause for a random amount of time between 50 and 350
-			// milliseconds.
-			/* ms := 50 + (rand.Int63() % 300) */
-			/* time.Sleep(time.Duration(ms) * time.Millisecond) */
-
 		}
+		if time.Now().After(rf.electiontime) {
+			rf.ResetElectionTimer()
+			rf.Election()
+		}
+		rf.mu.Unlock()
+
 	}
 	DPrintf("raft[%d] was stop!!!!\n", rf.me)
 }
 
-func (rf *Raft) Timer() {
-	for !rf.killed() {
-
-		switch atomic.LoadInt32(&rf.state) {
-		case Follower, Candidate:
-			if time.Now().After(rf.timer.Add(time.Duration(500+rand.Intn(501)) * time.Millisecond)) {
-				rf.timer = time.Now()
-				rf.electionTimeout <- struct{}{}
-			} else {
-				time.Sleep(100 * time.Millisecond)
-			}
-		case Leader:
-			if time.Now().After(rf.timer.Add(100 * time.Millisecond)) {
-				rf.timer = time.Now()
-				rf.heartbeatTimeout <- struct{}{}
-			} else {
-				time.Sleep(100 * time.Millisecond)
-			}
-		}
-
-	}
+func (rf *Raft) ResetElectionTimer() {
+	rf.electiontime = time.Now().Add(time.Duration(150+rand.Intn(150)) * time.Millisecond)
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -653,13 +633,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (3A, 3B, 3C).
-	/* rf.state = Follower */
-	/* rf.timer = time.Now() */
 	rf.SetState(Follower)
 	rf.currentTerm = 1
 	rf.votedFor = -1
-	rf.heartbeatTimeout = make(chan struct{})
-	rf.electionTimeout = make(chan struct{})
+	rf.heartbeattime = 100 * time.Millisecond
+	rf.ResetElectionTimer()
 	rf.log = make([]LogEntry, 0)
 	rf.commitIndex = 0
 	rf.lastApplied = 0
@@ -675,8 +653,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-	//start timer
-	go rf.Timer()
 
 	return rf
 }
